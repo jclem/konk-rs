@@ -112,16 +112,11 @@ fn main() -> std::io::Result<()> {
                 .iter()
                 .enumerate()
                 .map(|(i, label)| {
-                    let color = 30 + (i % 8);
+                    let color = 31 + (i % 9);
                     let color = if no_color { 0 } else { color };
                     let padding = max_label_len - label.len();
 
-                    format!(
-                        "\x1b[0;{}m[{}{}]\x1b[0;30m",
-                        color,
-                        label,
-                        " ".repeat(padding)
-                    )
+                    format!("\x1b[0;{}m[{}{}]\x1b[0m", color, label, " ".repeat(padding))
                 })
                 .collect();
 
