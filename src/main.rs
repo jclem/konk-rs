@@ -1,45 +1,141 @@
+use clap::{Parser, Subcommand};
 use std::{
-    env,
     io::BufRead,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     thread::JoinHandle,
 };
 
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    #[command(
+        alias = "r",
+        about = "Run commands serially or concurrently (alias: r)"
+    )]
+    Run {
+        #[arg(
+            short = 'L',
+            long,
+            help = "Use command as its own label",
+            global = true
+        )]
+        command_as_label: bool,
+
+        #[arg(
+            short = 'c',
+            long,
+            help = "Continue running commands after a failure",
+            global = true
+        )]
+        continue_on_error: bool,
+
+        #[arg(
+            short = 'l',
+            long = "label",
+            help = "Label prefix for a command",
+            global = true
+        )]
+        labels: Vec<String>,
+
+        #[arg(global = true)]
+        commands: Vec<String>,
+
+        #[command(subcommand)]
+        command: RunCommands,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RunCommands {
+    #[command(alias = "s", about = "Run commands serially (alias: s)")]
+    Serially {},
+
+    #[command(alias = "c", about = "Run commands concurrently (alias: c)")]
+    Concurrently {},
+}
+
 fn main() -> std::io::Result<()> {
-    let mut args = env::args();
+    let args = Args::parse();
 
-    match args.nth(1).as_deref() {
-        Some("run") => handle_run(args),
-        Some(command) => {
-            eprintln!("unknown command: {}", command);
-            std::process::exit(1);
-        }
-        None => {
-            eprintln!("no args");
-            std::process::exit(1);
+    match args.command {
+        Commands::Run {
+            command_as_label,
+            continue_on_error,
+            labels,
+            commands,
+            command,
+        } => {
+            if labels.len() > 0 && labels.len() != commands.len() {
+                eprintln!("Number of labels must match number of commands");
+                std::process::exit(1);
+            }
+
+            if labels.len() > 0 && command_as_label {
+                eprintln!("Cannot use -L and -l together");
+                std::process::exit(1);
+            }
+
+            let labels: Vec<String> = commands
+                .iter()
+                .enumerate()
+                .map(|(i, command)| {
+                    if command_as_label {
+                        command.clone()
+                    } else {
+                        format!("{}", i)
+                    }
+                })
+                .collect();
+
+            let max_label_len = labels
+                .iter()
+                .max_by_key(|label| label.len())
+                .unwrap_or(&String::from(""))
+                .len();
+
+            let padded_labels: Vec<String> = labels
+                .iter()
+                .map(|label| {
+                    let padding = max_label_len - label.len();
+                    format!("{}{}", label, " ".repeat(padding))
+                })
+                .collect();
+
+            match command {
+                RunCommands::Serially {} => run_serially(
+                    commands,
+                    SerialOpts {
+                        continue_on_error,
+                        labels: padded_labels,
+                    },
+                ),
+                RunCommands::Concurrently {} => run_concurrently(
+                    commands,
+                    ConcurrentOpts {
+                        continue_on_error,
+                        labels: padded_labels,
+                    },
+                ),
+            }
         }
     }
 }
 
-fn handle_run(mut args: env::Args) -> std::io::Result<()> {
-    // Command can be "s" or "serial"
-    match args.nth(0).as_deref() {
-        Some("s") | Some("serial") => handle_serial(args),
-        Some("c") | Some("concurrent") => handle_concurrent(args),
-        Some(command) => {
-            eprintln!("unknown command: {}", command);
-            std::process::exit(1);
-        }
-        _ => {
-            eprintln!("no command");
-            std::process::exit(1);
-        }
-    }
+struct SerialOpts {
+    continue_on_error: bool,
+    labels: Vec<String>,
 }
 
-fn handle_serial(args: env::Args) -> std::io::Result<()> {
-    // iterate with index
-    for (i, command) in args.enumerate() {
+fn run_serially(commands: Vec<String>, opts: SerialOpts) -> std::io::Result<()> {
+    let mut command_failed = false;
+
+    for (i, command) in commands.into_iter().enumerate() {
         let mut child = Command::new("/bin/sh")
             .args(["-c", &command])
             .stdout(Stdio::piped())
@@ -47,24 +143,29 @@ fn handle_serial(args: env::Args) -> std::io::Result<()> {
             .spawn()
             .expect("process spawned");
 
+        let label = opts.labels.get(i).expect("label should exist");
         let stdout = child.stdout.take().expect("child should have stdout");
         let stderr = child.stderr.take().expect("child should have stderr");
+
+        let stdout_label = label.clone();
 
         let stdout_thread = std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stdout);
 
             for line in reader.lines() {
                 let line = line.unwrap();
-                println!("{}: {}", i, line);
+                println!("{}: {}", stdout_label, line);
             }
         });
+
+        let stderr_label = label.clone();
 
         let stderr_thread = std::thread::spawn(move || {
             let reader = std::io::BufReader::new(stderr);
 
             for line in reader.lines() {
                 let line = line.unwrap();
-                println!("{}: {}", i, line);
+                println!("{}: {}", stderr_label, line);
             }
         });
 
@@ -73,21 +174,38 @@ fn handle_serial(args: env::Args) -> std::io::Result<()> {
 
         let status = child.wait()?;
         if !status.success() {
-            eprintln!("command exited with status: {}", status);
-            std::process::exit(1);
+            eprintln!("{}: command exited with status: {}", label, status);
+
+            command_failed = true;
+
+            if !opts.continue_on_error {
+                std::process::exit(1);
+            }
         }
+    }
+
+    if command_failed {
+        std::process::exit(1);
     }
 
     Ok(())
 }
 
-fn handle_concurrent(args: env::Args) -> std::io::Result<()> {
-    // Create a vector to store the threads
-    let mut threads: Vec<JoinHandle<()>> = vec![];
+struct ConcurrentOpts {
+    continue_on_error: bool,
+    labels: Vec<String>,
+}
 
-    // iterate with index
-    for (i, command) in args.enumerate() {
-        let child_thread = std::thread::spawn(move || {
+fn run_concurrently(commands: Vec<String>, opts: ConcurrentOpts) -> std::io::Result<()> {
+    let mut threads: Vec<JoinHandle<ExitStatus>> = vec![];
+    let mut command_failed = false;
+
+    for (i, command) in commands.into_iter().enumerate() {
+        command_failed = true;
+
+        let label = opts.labels.get(i).expect("label should exist").clone();
+
+        threads.push(std::thread::spawn(move || {
             let mut child = Command::new("/bin/sh")
                 .args(["-c", &command])
                 .stdout(Stdio::piped())
@@ -98,21 +216,25 @@ fn handle_concurrent(args: env::Args) -> std::io::Result<()> {
             let stdout = child.stdout.take().expect("child should have stdout");
             let stderr = child.stderr.take().expect("child should have stderr");
 
+            let stdout_label = label.clone();
+
             let stdout_thread = std::thread::spawn(move || {
                 let reader = std::io::BufReader::new(stdout);
 
                 for line in reader.lines() {
                     let line = line.unwrap();
-                    println!("{}: {}", i, line);
+                    println!("{}: {}", stdout_label, line);
                 }
             });
+
+            let stderr_label = label.clone();
 
             let stderr_thread = std::thread::spawn(move || {
                 let reader = std::io::BufReader::new(stderr);
 
                 for line in reader.lines() {
                     let line = line.unwrap();
-                    println!("{}: {}", i, line);
+                    println!("{}: {}", stderr_label, line);
                 }
             });
 
@@ -124,22 +246,28 @@ fn handle_concurrent(args: env::Args) -> std::io::Result<()> {
                 Ok(status) => {
                     if !status.success() {
                         eprintln!("command exited with status: {}", status);
-                        std::process::exit(1);
+
+                        if !opts.continue_on_error {
+                            std::process::exit(1);
+                        }
                     }
+
+                    status
                 }
                 Err(e) => {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }
             }
-        });
-
-        threads.push(child_thread);
+        }))
     }
 
-    // Await all threads
     for thread in threads {
         thread.join().expect("thread should finish");
+    }
+
+    if command_failed {
+        std::process::exit(1);
     }
 
     Ok(())
