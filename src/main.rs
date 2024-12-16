@@ -43,6 +43,14 @@ enum Commands {
         )]
         labels: Vec<String>,
 
+        #[arg(
+            short = 'C',
+            long = "no-color",
+            help = "Do not colorize label output",
+            global = true
+        )]
+        no_color: bool,
+
         #[arg(global = true)]
         commands: Vec<String>,
 
@@ -68,6 +76,7 @@ fn main() -> std::io::Result<()> {
             command_as_label,
             continue_on_error,
             labels,
+            no_color,
             commands,
             command,
         } => {
@@ -88,7 +97,7 @@ fn main() -> std::io::Result<()> {
                     if command_as_label {
                         command.clone()
                     } else {
-                        format!("{}", i)
+                        format!("{i}")
                     }
                 })
                 .collect();
@@ -99,11 +108,20 @@ fn main() -> std::io::Result<()> {
                 .unwrap_or(&String::from(""))
                 .len();
 
-            let padded_labels: Vec<String> = labels
+            let labels: Vec<String> = labels
                 .iter()
-                .map(|label| {
+                .enumerate()
+                .map(|(i, label)| {
+                    let color = 30 + (i % 8);
+                    let color = if no_color { 0 } else { color };
                     let padding = max_label_len - label.len();
-                    format!("{}{}", label, " ".repeat(padding))
+
+                    format!(
+                        "\x1b[0;{}m[{}{}]\x1b[0;30m",
+                        color,
+                        label,
+                        " ".repeat(padding)
+                    )
                 })
                 .collect();
 
@@ -112,14 +130,14 @@ fn main() -> std::io::Result<()> {
                     commands,
                     SerialOpts {
                         continue_on_error,
-                        labels: padded_labels,
+                        labels,
                     },
                 ),
                 RunCommands::Concurrently {} => run_concurrently(
                     commands,
                     ConcurrentOpts {
                         continue_on_error,
-                        labels: padded_labels,
+                        labels,
                     },
                 ),
             }
@@ -154,7 +172,7 @@ fn run_serially(commands: Vec<String>, opts: SerialOpts) -> std::io::Result<()> 
 
             for line in reader.lines() {
                 let line = line.unwrap();
-                println!("{}: {}", stdout_label, line);
+                println!("{} {}", stdout_label, line);
             }
         });
 
@@ -174,7 +192,7 @@ fn run_serially(commands: Vec<String>, opts: SerialOpts) -> std::io::Result<()> 
 
         let status = child.wait()?;
         if !status.success() {
-            eprintln!("{}: command exited with status: {}", label, status);
+            eprintln!("{} command exited with status: {}", label, status);
 
             command_failed = true;
 
@@ -223,7 +241,7 @@ fn run_concurrently(commands: Vec<String>, opts: ConcurrentOpts) -> std::io::Res
 
                 for line in reader.lines() {
                     let line = line.unwrap();
-                    println!("{}: {}", stdout_label, line);
+                    println!("{} {}", stdout_label, line);
                 }
             });
 
@@ -234,7 +252,7 @@ fn run_concurrently(commands: Vec<String>, opts: ConcurrentOpts) -> std::io::Res
 
                 for line in reader.lines() {
                     let line = line.unwrap();
-                    println!("{}: {}", stderr_label, line);
+                    println!("{} {}", stderr_label, line);
                 }
             });
 
@@ -245,7 +263,7 @@ fn run_concurrently(commands: Vec<String>, opts: ConcurrentOpts) -> std::io::Res
             match status {
                 Ok(status) => {
                     if !status.success() {
-                        eprintln!("command exited with status: {}", status);
+                        eprintln!("{} command exited with status: {}", label, status);
 
                         if !opts.continue_on_error {
                             std::process::exit(1);
@@ -255,7 +273,7 @@ fn run_concurrently(commands: Vec<String>, opts: ConcurrentOpts) -> std::io::Res
                     status
                 }
                 Err(e) => {
-                    eprintln!("error: {}", e);
+                    eprintln!("{} error: {}", label, e);
                     std::process::exit(1);
                 }
             }
