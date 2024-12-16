@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 use std::{
     io::BufRead,
     process::{Command, ExitStatus, Stdio},
@@ -12,6 +13,11 @@ struct Args {
     command: Commands,
 }
 
+#[derive(Deserialize, Debug)]
+struct PackageJSON {
+    scripts: std::collections::HashMap<String, String>,
+}
+
 #[derive(Subcommand, Debug)]
 enum Commands {
     #[command(
@@ -19,6 +25,22 @@ enum Commands {
         about = "Run commands serially or concurrently (alias: r)"
     )]
     Run {
+        #[arg(
+            short = 'n',
+            long,
+            help = "Run script from package.json",
+            global = true
+        )]
+        npm: Vec<String>,
+
+        #[arg(
+            short = 'b',
+            long,
+            help = "Run package.json scripts with Bun",
+            global = true
+        )]
+        bun: bool,
+
         #[arg(
             short = 'L',
             long,
@@ -73,13 +95,41 @@ fn main() -> std::io::Result<()> {
 
     match args.command {
         Commands::Run {
+            npm,
+            bun,
             command_as_label,
             continue_on_error,
             labels,
             no_color,
-            commands,
+            mut commands,
             command,
         } => {
+            if npm.len() > 0 {
+                // Read the package.json file
+                let package_json = std::fs::read_to_string("package.json")?;
+                let package_json: PackageJSON = serde_json::from_str(&package_json)?;
+                let run_with = if bun { "bun" } else { "npm" };
+
+                for script in npm {
+                    if script.ends_with("*") {
+                        let prefix = script.strip_suffix("*").unwrap();
+
+                        for (key, _) in package_json.scripts.iter() {
+                            if key.starts_with(prefix) {
+                                commands.push(format!("{} run {}", run_with, key));
+                            }
+                        }
+                    } else {
+                        assert!(
+                            package_json.scripts.contains_key(&script),
+                            "Script does not exist in package.json"
+                        );
+
+                        commands.push(format!("{} run {}", run_with, script));
+                    }
+                }
+            }
+
             if labels.len() > 0 && labels.len() != commands.len() {
                 eprintln!("Number of labels must match number of commands");
                 std::process::exit(1);
