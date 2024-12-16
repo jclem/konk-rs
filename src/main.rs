@@ -114,7 +114,7 @@ fn main() -> std::io::Result<()> {
                     if script.ends_with("*") {
                         let prefix = script.strip_suffix("*").unwrap();
 
-                        for (key, _) in package_json.scripts.iter() {
+                        for key in package_json.scripts.keys() {
                             if key.starts_with(prefix) {
                                 commands.push(format!("{} run {}", run_with, key));
                             }
