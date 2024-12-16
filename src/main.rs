@@ -147,7 +147,7 @@ fn main() -> std::io::Result<()> {
                     if command_as_label {
                         command.clone()
                     } else {
-                        format!("{i}")
+                        format!("{}", labels.get(i).unwrap_or(&String::from(format!("{i}"))))
                     }
                 })
                 .collect();
