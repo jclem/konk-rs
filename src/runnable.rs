@@ -61,7 +61,7 @@ impl Runnable {
         }
 
         if self.show_pid {
-            self.label = format!("{} (PID: {})", self.label, child.id());
+            self.label = format!("{}(PID: {}) ", self.label, child.id());
         }
 
         let stdout = child.stdout.take().context("get child stdout")?;
@@ -81,7 +81,7 @@ impl Runnable {
                 if aggregate_output {
                     out_lines.lock().unwrap().push(line.clone());
                 } else {
-                    println!("{} {}", out_label, line);
+                    println!("{out_label}{line}");
                 }
             }
 
@@ -100,7 +100,7 @@ impl Runnable {
                 if aggregate_output {
                     err_lines.lock().unwrap().push(line.clone());
                 } else {
-                    println!("{} {}", err_label, line);
+                    println!("{err_label}{line}");
                 }
             }
 
@@ -156,7 +156,7 @@ impl RunHandle {
 
         // Will be empty if aggregate_output is false
         for line in self.output.lock().unwrap().iter() {
-            println!("{} {}", self.label, line);
+            println!("{}{}", self.label, line);
         }
 
         let status = self.child.wait().context("wait for child")?;

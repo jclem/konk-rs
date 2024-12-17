@@ -81,6 +81,14 @@ enum Commands {
         )]
         no_subshell: bool,
 
+        #[arg(
+            short = 'B',
+            long,
+            help = "Do not attach label to output",
+            global = true
+        )]
+        no_label: bool,
+
         #[arg(long, help = "Include command PID in label", global = true)]
         show_pid: bool,
 
@@ -124,6 +132,7 @@ fn main() -> Result<()> {
             labels: provided_labels,
             show_pid,
             no_color,
+            no_label,
             no_subshell,
             mut commands,
             command,
@@ -141,7 +150,13 @@ fn main() -> Result<()> {
                 anyhow::bail!("Cannot use -L and -l together");
             }
 
-            let labels = collect_labels(&commands, &provided_labels, command_as_label, !no_color);
+            let labels;
+
+            if no_label {
+                labels = vec!["".to_string(); commands.len()];
+            } else {
+                labels = collect_labels(&commands, &provided_labels, command_as_label, !no_color);
+            }
 
             let mut runnables: Vec<Runnable> = commands
                 .iter()
@@ -302,7 +317,7 @@ fn collect_labels(
         .map(|(i, label)| {
             let color = if use_color { 31 + (i % 9) } else { 0 };
             let padding = " ".repeat(max_label_len - label.len());
-            format!("\x1b[0;{}m[{}{}]\x1b[0m", color, label, padding)
+            format!("\x1b[0;{}m[{}{}]\x1b[0m ", color, label, padding)
         })
         .collect()
 }
