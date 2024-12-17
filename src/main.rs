@@ -81,6 +81,9 @@ enum Commands {
         )]
         no_subshell: bool,
 
+        #[arg(long, help = "Include command PID in label", global = true)]
+        show_pid: bool,
+
         #[arg(global = true)]
         commands: Vec<String>,
 
@@ -111,6 +114,7 @@ fn main() -> Result<()> {
             command_as_label,
             continue_on_error,
             labels: provided_labels,
+            show_pid,
             no_color,
             no_subshell,
             mut commands,
@@ -130,23 +134,24 @@ fn main() -> Result<()> {
 
             let labels = collect_labels(&commands, &provided_labels, command_as_label, !no_color);
 
-            let runnables: Vec<Runnable> = commands
+            let mut runnables: Vec<Runnable> = commands
                 .iter()
                 .zip(labels.into_iter())
                 .map(|(command, label)| Runnable {
                     use_subshell: !no_subshell,
                     command: command.clone(),
+                    show_pid,
                     label: label.clone(),
                 })
                 .collect();
 
             match command {
                 RunCommands::Serially {} => {
-                    run_serially(&runnables, SerialOpts { continue_on_error })
+                    run_serially(&mut runnables, SerialOpts { continue_on_error })
                 }
 
                 RunCommands::Concurrently { aggregate_output } => run_concurrently(
-                    &runnables,
+                    &mut runnables,
                     ConcurrentOpts {
                         continue_on_error,
                         aggregate_output,
@@ -161,7 +166,7 @@ struct SerialOpts {
     continue_on_error: bool,
 }
 
-fn run_serially(runnables: &[Runnable], opts: SerialOpts) -> Result<()> {
+fn run_serially(runnables: &mut [Runnable], opts: SerialOpts) -> Result<()> {
     let mut command_failed = false;
 
     for runnable in runnables.into_iter() {
@@ -186,7 +191,7 @@ struct ConcurrentOpts {
     aggregate_output: bool,
 }
 
-fn run_concurrently(runnables: &[Runnable], opts: ConcurrentOpts) -> Result<()> {
+fn run_concurrently(runnables: &mut [Runnable], opts: ConcurrentOpts) -> Result<()> {
     let mut handles: Vec<RunHandle> = vec![];
     let mut command_failed = false;
 

@@ -12,10 +12,11 @@ pub struct Runnable {
     pub use_subshell: bool,
     pub command: String,
     pub label: String,
+    pub show_pid: bool,
 }
 
 impl Runnable {
-    pub fn run(&self, aggregate_output: bool) -> Result<RunHandle> {
+    pub fn run(&mut self, aggregate_output: bool) -> Result<RunHandle> {
         let mut child;
 
         if self.use_subshell {
@@ -36,6 +37,10 @@ impl Runnable {
                 .stderr(Stdio::piped())
                 .spawn()
                 .context(format!("spawn process: {command}"))?;
+        }
+
+        if self.show_pid {
+            self.label = format!("{} (PID: {})", self.label, child.id());
         }
 
         let stdout = child.stdout.take().context("get child stdout")?;
