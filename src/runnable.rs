@@ -8,16 +8,37 @@ use std::{
     thread::{spawn, JoinHandle},
 };
 
+/// A representation of a command to be run and streamed to stdout
 #[derive(Debug)]
 pub struct Runnable {
-    pub use_subshell: bool,
-    pub command: String,
+    /// The label to prepend to each line of output
     pub label: String,
+
+    /// Whether to show the PID of the command after the label
     pub show_pid: bool,
+
+    /// The command and its arguments to run as a single string
+    ///
+    /// If [use_subshell](Runnable::use_subshell) is true, this will be run in a subshell (/bin/sh).
+    /// Otherwise, the command will be split into a command and its arguments.
+    pub command: String,
+
+    /// The working directory to run the command in
     pub working_dir: Option<String>,
+
+    /// Whether to run the command in a subshell (/bin/sh)
+    pub use_subshell: bool,
 }
 
 impl Runnable {
+    /// Runs the runnable command
+    ///
+    /// If `aggregate_output` is true, the output of the command will be
+    /// collected and printed at the end. Otherwise, the output will be
+    /// streamed to stdout as it is produced.
+    ///
+    /// Returns a [RunHandle] that can be used to wait for the
+    /// command to finish.
     pub fn run(&mut self, aggregate_output: bool) -> Result<RunHandle> {
         let mut child;
 
@@ -117,6 +138,8 @@ impl Runnable {
     }
 }
 
+/// A handle to a running command, which can be used to wait for the command to
+/// finish
 #[derive(Debug)]
 pub struct RunHandle {
     child: std::process::Child,
@@ -126,10 +149,12 @@ pub struct RunHandle {
     output: Arc<Mutex<Vec<String>>>,
 }
 
+/// An error indicating that a command exited with a non-zero status
 #[derive(Debug)]
-struct ExitStatusError {
+pub struct ExitStatusError {
+    /// The exit status of the command
+    pub status: ExitStatus,
     label: String,
-    status: ExitStatus,
 }
 
 impl fmt::Display for ExitStatusError {
@@ -143,6 +168,12 @@ impl fmt::Display for ExitStatusError {
 }
 
 impl RunHandle {
+    /// Waits for the command to finish
+    ///
+    /// If the command ran with output aggregation (see [Runnable::run]), the output will be printed
+    /// to stdout after the command has finished.
+    ///
+    /// Returns an error if the command exited with a non-zero status.
     pub fn wait(mut self) -> Result<()> {
         self.out_handle
             .join()
@@ -154,12 +185,12 @@ impl RunHandle {
             .map_err(|err| anyhow::anyhow!("join stderr: panicked: {:?}", err))
             .context("join stderr thread")??;
 
+        let status = self.child.wait().context("wait for child")?;
+
         // Will be empty if aggregate_output is false
         for line in self.output.lock().unwrap().iter() {
             println!("{}{}", self.label, line);
         }
-
-        let status = self.child.wait().context("wait for child")?;
 
         if !status.success() {
             let label = self.label.clone();
