@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::{
     fmt,
+    fs::canonicalize,
     io::{BufRead, BufReader},
     process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
@@ -13,15 +14,29 @@ pub struct Runnable {
     pub command: String,
     pub label: String,
     pub show_pid: bool,
+    pub working_dir: Option<String>,
 }
 
 impl Runnable {
     pub fn run(&mut self, aggregate_output: bool) -> Result<RunHandle> {
         let mut child;
 
+        let working_dir;
+        if let Some(dir) = &self.working_dir {
+            working_dir = Some(canonicalize(dir).context("canonicalize working directory")?);
+        } else {
+            working_dir = None;
+        }
+
         if self.use_subshell {
-            child = Command::new("/bin/sh")
-                .args(["-c", &self.command])
+            let mut cmd = Command::new("/bin/sh");
+            cmd.args(["-c", &self.command]);
+
+            if let Some(working_dir) = working_dir {
+                cmd.current_dir(working_dir);
+            }
+
+            child = cmd
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()
@@ -31,8 +46,14 @@ impl Runnable {
             let command = parts.get(0).context("get command")?;
             let rest = parts.get(1..).context("get arguments")?;
 
-            child = Command::new(command)
-                .args(rest)
+            let mut cmd = Command::new(command);
+            cmd.args(rest);
+
+            if let Some(working_dir) = working_dir {
+                cmd.current_dir(working_dir);
+            }
+
+            child = cmd
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .spawn()

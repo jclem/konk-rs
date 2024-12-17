@@ -89,6 +89,14 @@ enum Commands {
 
         #[command(subcommand)]
         command: RunCommands,
+
+        #[arg(
+            short = 'w',
+            long,
+            help = "Working directory for commands",
+            global = true
+        )]
+        working_directory: Option<String>,
     },
 }
 
@@ -119,6 +127,7 @@ fn main() -> Result<()> {
             no_subshell,
             mut commands,
             command,
+            working_directory,
         } => {
             if let Err(err) = add_npm_commands(&mut commands, &npm, bun) {
                 anyhow::bail!("adding npm commands: {}", err);
@@ -138,10 +147,11 @@ fn main() -> Result<()> {
                 .iter()
                 .zip(labels.into_iter())
                 .map(|(command, label)| Runnable {
-                    use_subshell: !no_subshell,
                     command: command.clone(),
-                    show_pid,
+                    working_dir: working_directory.clone(),
+                    use_subshell: !no_subshell,
                     label: label.clone(),
+                    show_pid,
                 })
                 .collect();
 
