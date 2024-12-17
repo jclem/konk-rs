@@ -73,6 +73,14 @@ enum Commands {
         )]
         no_color: bool,
 
+        #[arg(
+            short = 'S',
+            long = "no-subshell",
+            help = "Do not run commands in a subshell",
+            global = true
+        )]
+        no_subshell: bool,
+
         #[arg(global = true)]
         commands: Vec<String>,
 
@@ -104,6 +112,7 @@ fn main() -> Result<()> {
             continue_on_error,
             labels: provided_labels,
             no_color,
+            no_subshell,
             mut commands,
             command,
         } => {
@@ -125,6 +134,7 @@ fn main() -> Result<()> {
                 .iter()
                 .zip(labels.into_iter())
                 .map(|(command, label)| Runnable {
+                    use_subshell: !no_subshell,
                     command: command.clone(),
                     label: label.clone(),
                 })

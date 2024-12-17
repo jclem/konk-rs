@@ -9,18 +9,34 @@ use std::{
 
 #[derive(Debug)]
 pub struct Runnable {
+    pub use_subshell: bool,
     pub command: String,
     pub label: String,
 }
 
 impl Runnable {
     pub fn run(&self, aggregate_output: bool) -> Result<RunHandle> {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", &self.command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("process spawned");
+        let mut child;
+
+        if self.use_subshell {
+            child = Command::new("/bin/sh")
+                .args(["-c", &self.command])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context(format!("spawn process: {}", self.command))?;
+        } else {
+            let parts = shell_words::split(&self.command).context("split command")?;
+            let command = parts.get(0).context("get command")?;
+            let rest = parts.get(1..).context("get arguments")?;
+
+            child = Command::new(command)
+                .args(rest)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .context(format!("spawn process: {command}"))?;
+        }
 
         let stdout = child.stdout.take().context("get child stdout")?;
         let stderr = child.stderr.take().context("get child stderr")?;
