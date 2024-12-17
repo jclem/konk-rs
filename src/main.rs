@@ -1,10 +1,10 @@
+mod runnable;
+
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use runnable::{RunHandle, Runnable};
 use serde::Deserialize;
-use std::{
-    io::BufRead,
-    process::{Command, ExitStatus, Stdio},
-    thread::JoinHandle,
-};
+use std::{sync::mpsc, thread};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -87,10 +87,13 @@ enum RunCommands {
     Serially {},
 
     #[command(alias = "c", about = "Run commands concurrently (alias: c)")]
-    Concurrently {},
+    Concurrently {
+        #[arg(short = 'g', long, help = "Aggregate command output", global = true)]
+        aggregate_output: bool,
+    },
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> Result<()> {
     let args = Args::parse();
 
     match args.command {
@@ -99,90 +102,44 @@ fn main() -> std::io::Result<()> {
             bun,
             command_as_label,
             continue_on_error,
-            labels,
+            labels: provided_labels,
             no_color,
             mut commands,
             command,
         } => {
-            if npm.len() > 0 {
-                // Read the package.json file
-                let package_json = std::fs::read_to_string("package.json")?;
-                let package_json: PackageJSON = serde_json::from_str(&package_json)?;
-                let run_with = if bun { "bun" } else { "npm" };
-
-                for script in npm {
-                    if script.ends_with("*") {
-                        let prefix = script.strip_suffix("*").unwrap();
-
-                        for key in package_json.scripts.keys() {
-                            if key.starts_with(prefix) {
-                                commands.push(format!("{} run {}", run_with, key));
-                            }
-                        }
-                    } else {
-                        assert!(
-                            package_json.scripts.contains_key(&script),
-                            "Script does not exist in package.json"
-                        );
-
-                        commands.push(format!("{} run {}", run_with, script));
-                    }
-                }
+            if let Err(err) = add_npm_commands(&mut commands, &npm, bun) {
+                anyhow::bail!("adding npm commands: {}", err);
             }
 
-            if labels.len() > 0 && labels.len() != commands.len() {
-                eprintln!("Number of labels must match number of commands");
-                std::process::exit(1);
+            if provided_labels.len() > 0 && provided_labels.len() != commands.len() {
+                anyhow::bail!("Number of provided_labels must match number of commands");
             }
 
-            if labels.len() > 0 && command_as_label {
-                eprintln!("Cannot use -L and -l together");
-                std::process::exit(1);
+            if provided_labels.len() > 0 && command_as_label {
+                anyhow::bail!("Cannot use -L and -l together");
             }
 
-            let labels: Vec<String> = commands
-                .iter()
-                .enumerate()
-                .map(|(i, command)| {
-                    if command_as_label {
-                        command.clone()
-                    } else {
-                        format!("{}", labels.get(i).unwrap_or(&String::from(format!("{i}"))))
-                    }
-                })
-                .collect();
+            let labels = collect_labels(&commands, &provided_labels, command_as_label, !no_color);
 
-            let max_label_len = labels
+            let runnables: Vec<Runnable> = commands
                 .iter()
-                .max_by_key(|label| label.len())
-                .unwrap_or(&String::from(""))
-                .len();
-
-            let labels: Vec<String> = labels
-                .iter()
-                .enumerate()
-                .map(|(i, label)| {
-                    let color = 31 + (i % 9);
-                    let color = if no_color { 0 } else { color };
-                    let padding = max_label_len - label.len();
-
-                    format!("\x1b[0;{}m[{}{}]\x1b[0m", color, label, " ".repeat(padding))
+                .zip(labels.into_iter())
+                .map(|(command, label)| Runnable {
+                    command: command.clone(),
+                    label: label.clone(),
                 })
                 .collect();
 
             match command {
-                RunCommands::Serially {} => run_serially(
-                    commands,
-                    SerialOpts {
-                        continue_on_error,
-                        labels,
-                    },
-                ),
-                RunCommands::Concurrently {} => run_concurrently(
-                    commands,
+                RunCommands::Serially {} => {
+                    run_serially(&runnables, SerialOpts { continue_on_error })
+                }
+
+                RunCommands::Concurrently { aggregate_output } => run_concurrently(
+                    &runnables,
                     ConcurrentOpts {
                         continue_on_error,
-                        labels,
+                        aggregate_output,
                     },
                 ),
             }
@@ -192,63 +149,22 @@ fn main() -> std::io::Result<()> {
 
 struct SerialOpts {
     continue_on_error: bool,
-    labels: Vec<String>,
 }
 
-fn run_serially(commands: Vec<String>, opts: SerialOpts) -> std::io::Result<()> {
+fn run_serially(runnables: &[Runnable], opts: SerialOpts) -> Result<()> {
     let mut command_failed = false;
 
-    for (i, command) in commands.into_iter().enumerate() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", &command])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("process spawned");
-
-        let label = opts.labels.get(i).expect("label should exist");
-        let stdout = child.stdout.take().expect("child should have stdout");
-        let stderr = child.stderr.take().expect("child should have stderr");
-
-        let stdout_label = label.clone();
-
-        let stdout_thread = std::thread::spawn(move || {
-            let reader = std::io::BufReader::new(stdout);
-
-            for line in reader.lines() {
-                let line = line.unwrap();
-                println!("{} {}", stdout_label, line);
-            }
-        });
-
-        let stderr_label = label.clone();
-
-        let stderr_thread = std::thread::spawn(move || {
-            let reader = std::io::BufReader::new(stderr);
-
-            for line in reader.lines() {
-                let line = line.unwrap();
-                println!("{}: {}", stderr_label, line);
-            }
-        });
-
-        stdout_thread.join().expect("thread should finish");
-        stderr_thread.join().expect("thread should finish");
-
-        let status = child.wait()?;
-        if !status.success() {
-            eprintln!("{} command exited with status: {}", label, status);
-
+    for runnable in runnables.into_iter() {
+        if let Err(_) = runnable.run().context("run command")?.wait(false) {
             command_failed = true;
-
             if !opts.continue_on_error {
-                std::process::exit(1);
+                break;
             }
         }
     }
 
     if command_failed {
-        std::process::exit(1);
+        anyhow::bail!("One or more commands failed");
     }
 
     Ok(())
@@ -256,82 +172,110 @@ fn run_serially(commands: Vec<String>, opts: SerialOpts) -> std::io::Result<()> 
 
 struct ConcurrentOpts {
     continue_on_error: bool,
-    labels: Vec<String>,
+    aggregate_output: bool,
 }
 
-fn run_concurrently(commands: Vec<String>, opts: ConcurrentOpts) -> std::io::Result<()> {
-    let mut threads: Vec<JoinHandle<ExitStatus>> = vec![];
+fn run_concurrently(runnables: &[Runnable], opts: ConcurrentOpts) -> Result<()> {
+    let mut handles: Vec<RunHandle> = vec![];
     let mut command_failed = false;
 
-    for (i, command) in commands.into_iter().enumerate() {
-        command_failed = true;
-
-        let label = opts.labels.get(i).expect("label should exist").clone();
-
-        threads.push(std::thread::spawn(move || {
-            let mut child = Command::new("/bin/sh")
-                .args(["-c", &command])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("process spawned");
-
-            let stdout = child.stdout.take().expect("child should have stdout");
-            let stderr = child.stderr.take().expect("child should have stderr");
-
-            let stdout_label = label.clone();
-
-            let stdout_thread = std::thread::spawn(move || {
-                let reader = std::io::BufReader::new(stdout);
-
-                for line in reader.lines() {
-                    let line = line.unwrap();
-                    println!("{} {}", stdout_label, line);
-                }
-            });
-
-            let stderr_label = label.clone();
-
-            let stderr_thread = std::thread::spawn(move || {
-                let reader = std::io::BufReader::new(stderr);
-
-                for line in reader.lines() {
-                    let line = line.unwrap();
-                    println!("{} {}", stderr_label, line);
-                }
-            });
-
-            stdout_thread.join().expect("thread should finish");
-            stderr_thread.join().expect("thread should finish");
-
-            let status = child.wait();
-            match status {
-                Ok(status) => {
-                    if !status.success() {
-                        eprintln!("{} command exited with status: {}", label, status);
-
-                        if !opts.continue_on_error {
-                            std::process::exit(1);
-                        }
-                    }
-
-                    status
-                }
-                Err(e) => {
-                    eprintln!("{} error: {}", label, e);
-                    std::process::exit(1);
-                }
-            }
-        }))
+    for runnable in runnables {
+        let handle = runnable.run().context("run command")?;
+        handles.push(handle);
     }
 
-    for thread in threads {
-        thread.join().expect("thread should finish");
+    let (tx, rx) = mpsc::channel::<Result<()>>();
+
+    for handle in handles {
+        let tx = tx.clone();
+
+        thread::spawn(move || {
+            let res = handle.wait(opts.aggregate_output);
+            let _ = tx.send(res); // Ignore send error.
+        });
+    }
+
+    drop(tx);
+
+    for result in rx {
+        if let Err(_) = result {
+            command_failed = true;
+            if !opts.continue_on_error {
+                break;
+            }
+        }
     }
 
     if command_failed {
-        std::process::exit(1);
+        anyhow::bail!("One or more commands failed");
     }
 
     Ok(())
+}
+
+fn add_npm_commands(commands: &mut Vec<String>, npm: &[String], use_bun: bool) -> Result<()> {
+    if npm.len() == 0 {
+        return Ok(());
+    }
+
+    let package_json = std::fs::read_to_string("package.json").context("read package.json")?;
+
+    let package_json: PackageJSON =
+        serde_json::from_str(&package_json).context("parse package.json")?;
+
+    let run_with = if use_bun { "bun" } else { "npm" };
+
+    for script in npm {
+        if script.ends_with("*") {
+            let prefix = script.strip_suffix("*").unwrap(); // Already checked suffix.
+
+            package_json.scripts.keys().for_each(|key| {
+                key.starts_with(prefix).then(|| {
+                    commands.push(format!("{} run {}", run_with, key));
+                });
+            });
+        } else {
+            if !package_json.scripts.contains_key(script) {
+                anyhow::bail!(r#"Script "{}" does not exist in package.json"#, script);
+            }
+
+            commands.push(format!("{} run {}", run_with, script));
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_labels(
+    commands: &[String],
+    provided_labels: &[String],
+    command_as_label: bool,
+    use_color: bool,
+) -> Vec<String> {
+    let labels: Vec<String> = if command_as_label {
+        commands.iter().cloned().collect()
+    } else {
+        commands
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                provided_labels
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| i.to_string())
+            })
+            .collect()
+    };
+
+    let max_label_len = labels.iter().map(|l| l.len()).max().unwrap_or_default();
+
+    labels
+        .into_iter()
+        .enumerate()
+        .map(|(i, label)| {
+            let color = if use_color { 31 + (i % 9) } else { 0 };
+            let padding = " ".repeat(max_label_len - label.len());
+            format!("\x1b[0;{}m[{}{}]\x1b[0m", color, label, padding)
+        })
+        .collect()
 }
