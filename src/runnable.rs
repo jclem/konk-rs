@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use std::{
+    fmt,
     io::{BufRead, BufReader},
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
     sync::{Arc, Mutex},
     thread::{spawn, JoinHandle},
 };
@@ -83,6 +84,22 @@ pub struct RunHandle {
     output: Arc<Mutex<Vec<String>>>,
 }
 
+#[derive(Debug)]
+struct ExitStatusError {
+    label: String,
+    status: ExitStatus,
+}
+
+impl fmt::Display for ExitStatusError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{} command exited with non-zero status: {}",
+            self.label, self.status
+        )
+    }
+}
+
 impl RunHandle {
     pub fn wait(mut self) -> Result<()> {
         self.out_handle
@@ -101,8 +118,11 @@ impl RunHandle {
         }
 
         let status = self.child.wait().context("wait for child")?;
+
         if !status.success() {
-            anyhow::bail!("{} command exited with status: {}", self.label, status);
+            let label = self.label.clone();
+            let err = ExitStatusError { label, status };
+            anyhow::bail!(err);
         }
 
         Ok(())

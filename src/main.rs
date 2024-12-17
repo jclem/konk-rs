@@ -155,7 +155,8 @@ fn run_serially(runnables: &[Runnable], opts: SerialOpts) -> Result<()> {
     let mut command_failed = false;
 
     for runnable in runnables.into_iter() {
-        if let Err(_) = runnable.run(false).context("run command")?.wait() {
+        if let Err(err) = runnable.run(false).context("run command")?.wait() {
+            eprintln!("{err}");
             command_failed = true;
             if !opts.continue_on_error {
                 break;
@@ -198,7 +199,8 @@ fn run_concurrently(runnables: &[Runnable], opts: ConcurrentOpts) -> Result<()> 
     drop(tx);
 
     for result in rx {
-        if let Err(_) = result {
+        if let Err(err) = result {
+            eprintln!("{err}");
             command_failed = true;
             if !opts.continue_on_error {
                 break;
