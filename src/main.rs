@@ -155,7 +155,7 @@ fn run_serially(runnables: &[Runnable], opts: SerialOpts) -> Result<()> {
     let mut command_failed = false;
 
     for runnable in runnables.into_iter() {
-        if let Err(_) = runnable.run().context("run command")?.wait(false) {
+        if let Err(_) = runnable.run(false).context("run command")?.wait() {
             command_failed = true;
             if !opts.continue_on_error {
                 break;
@@ -180,7 +180,7 @@ fn run_concurrently(runnables: &[Runnable], opts: ConcurrentOpts) -> Result<()> 
     let mut command_failed = false;
 
     for runnable in runnables {
-        let handle = runnable.run().context("run command")?;
+        let handle = runnable.run(opts.aggregate_output).context("run command")?;
         handles.push(handle);
     }
 
@@ -190,7 +190,7 @@ fn run_concurrently(runnables: &[Runnable], opts: ConcurrentOpts) -> Result<()> 
         let tx = tx.clone();
 
         thread::spawn(move || {
-            let res = handle.wait(opts.aggregate_output);
+            let res = handle.wait();
             let _ = tx.send(res); // Ignore send error.
         });
     }
