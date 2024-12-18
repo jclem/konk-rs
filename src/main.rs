@@ -4,6 +4,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use runnable::{RunHandle, Runnable};
 use serde::Deserialize;
+use signal_hook::{
+    consts::{SIGINT, SIGTERM},
+    iterator::Signals,
+};
 use std::{sync::mpsc, thread};
 
 #[derive(Parser, Debug)]
@@ -195,11 +199,18 @@ fn run_serially(runnables: &mut [Runnable], opts: SerialOpts) -> Result<()> {
     let mut command_failed = false;
 
     for runnable in runnables.into_iter() {
-        if let Err(err) = runnable.run(false).context("run command")?.wait() {
-            eprintln!("{err}");
-            command_failed = true;
-            if !opts.continue_on_error {
-                break;
+        let handle = runnable.run(false).context("run command")?;
+        let handles = vec![handle];
+
+        install_signal_handlers(&handles)?;
+
+        for handle in handles.into_iter() {
+            if let Err(err) = handle.wait() {
+                eprintln!("{err}");
+                command_failed = true;
+                if !opts.continue_on_error {
+                    break;
+                }
             }
         }
     }
@@ -225,6 +236,8 @@ fn run_concurrently(runnables: &mut [Runnable], opts: ConcurrentOpts) -> Result<
         handles.push(handle);
     }
 
+    install_signal_handlers(&handles)?;
+
     let (tx, rx) = mpsc::channel::<Result<()>>();
 
     for handle in handles {
@@ -232,7 +245,10 @@ fn run_concurrently(runnables: &mut [Runnable], opts: ConcurrentOpts) -> Result<
 
         thread::spawn(move || {
             let res = handle.wait();
-            let _ = tx.send(res); // Ignore send error.
+            let _ = tx.send(res).or_else(|err| -> Result<()> {
+                eprintln!("Failed to send result to main thread: {}", err);
+                Ok(())
+            });
         });
     }
 
@@ -320,4 +336,38 @@ fn collect_labels(
             format!("\x1b[0;{}m[{}{}]\x1b[0m ", color, label, padding)
         })
         .collect()
+}
+
+fn install_signal_handlers(handles: &Vec<RunHandle>) -> Result<()> {
+    let pids: Vec<u32> = handles.iter().map(|h| h.get_pid()).collect();
+    let mut signals = Signals::new([SIGINT, SIGTERM]).context("register signals")?;
+    let mut recv_once = false;
+
+    thread::spawn(move || {
+        for signal in signals.forever() {
+            match signal {
+                SIGINT | SIGTERM => {
+                    if recv_once {
+                        for pid in pids.iter() {
+                            // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
+                            let pid = nix::unistd::Pid::from_raw(*pid as i32);
+
+                            let _ = nix::sys::signal::kill(pid, nix::sys::signal::SIGKILL)
+                                .context("send signal to child")
+                                .or_else(|err| -> Result<()> {
+                                    eprintln!("Failed to send signal to child process: {}", err);
+                                    Ok(())
+                                });
+                        }
+                    } else {
+                        recv_once = true;
+                    }
+                }
+
+                _ => {}
+            }
+        }
+    });
+
+    Ok(())
 }

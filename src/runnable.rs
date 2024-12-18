@@ -129,6 +129,7 @@ impl Runnable {
         });
 
         Ok(RunHandle {
+            pid: child.id(),
             child,
             label: self.label.clone(),
             err_handle,
@@ -142,6 +143,7 @@ impl Runnable {
 /// finish
 #[derive(Debug)]
 pub struct RunHandle {
+    pid: u32,
     child: std::process::Child,
     label: String,
     out_handle: JoinHandle<Result<()>>,
@@ -168,6 +170,11 @@ impl fmt::Display for ExitStatusError {
 }
 
 impl RunHandle {
+    /// Gets the procss ID of the handle's child process
+    pub fn get_pid(&self) -> u32 {
+        self.pid
+    }
+
     /// Waits for the command to finish
     ///
     /// If the command ran with output aggregation (see [Runnable::run]), the output will be printed
