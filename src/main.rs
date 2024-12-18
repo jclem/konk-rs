@@ -341,13 +341,13 @@ fn collect_labels(
 fn install_signal_handlers(handles: &Vec<RunHandle>) -> Result<()> {
     let pids: Vec<u32> = handles.iter().map(|h| h.get_pid()).collect();
     let mut signals = Signals::new([SIGINT, SIGTERM]).context("register signals")?;
-    let mut recv_once = false;
+    let mut received_signal = false;
 
     thread::spawn(move || {
         for signal in signals.forever() {
             match signal {
                 SIGINT | SIGTERM => {
-                    if recv_once {
+                    if received_signal {
                         for pid in pids.iter() {
                             // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
                             let pid = nix::unistd::Pid::from_raw(*pid as i32);
@@ -364,7 +364,7 @@ fn install_signal_handlers(handles: &Vec<RunHandle>) -> Result<()> {
                         // thread and potentially spawning more serial commands.
                         std::process::exit(130);
                     } else {
-                        recv_once = true;
+                        received_signal = true;
                     }
                 }
 
