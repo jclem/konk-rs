@@ -359,6 +359,10 @@ fn install_signal_handlers(handles: &Vec<RunHandle>) -> Result<()> {
                                     Ok(())
                                 });
                         }
+
+                        // Exit: This ensures we don't continue running the main
+                        // thread and potentially spawning more serial commands.
+                        std::process::exit(130);
                     } else {
                         recv_once = true;
                     }
