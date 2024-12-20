@@ -1,7 +1,8 @@
 mod runnable;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use runnable::{RunHandle, Runnable};
 use serde::Deserialize;
 use signal_hook::{
@@ -9,13 +10,14 @@ use signal_hook::{
     iterator::Signals,
 };
 use std::{
+    nk,
     sync::{mpsc, Arc},
     thread,
 };
 
 #[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
-struct Args {
+#[command(version, about, long_about = None, bin_name = "konk")]
+struct CLI {
     #[command(subcommand)]
     command: Commands,
 }
@@ -27,6 +29,9 @@ struct PackageJSON {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    #[command(about = "Generate completion for a given shell")]
+    Completion { shell: Shell },
+
     #[command(
         alias = "r",
         about = "Run commands serially or concurrently (alias: r)"
@@ -135,9 +140,16 @@ enum RunCommands {
 }
 
 fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = CLI::parse();
 
     match args.command {
+        Commands::Completion { shell } => {
+            let mut cmd = CLI::command();
+            let bin_name = cmd.get_bin_name().context("bin name")?.to_string();
+            generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
+            Ok(())
+        }
+
         Commands::Run {
             npm,
             bun,
@@ -166,7 +178,6 @@ fn main() -> Result<()> {
             }
 
             let labels;
-
             if no_label {
                 labels = vec!["".to_string(); commands.len()];
             } else {
@@ -175,12 +186,12 @@ fn main() -> Result<()> {
 
             let mut runnables: Vec<Runnable> = commands
                 .iter()
-                .zip(labels.into_iter())
+                .zip(labels.iter())
                 .map(|(command, label)| Runnable {
                     command: command.clone(),
+                    label: label.clone(),
                     working_dir: working_directory.clone(),
                     use_subshell: !no_subshell,
-                    label: label.clone(),
                     show_pid,
                 })
                 .collect();
@@ -384,7 +395,7 @@ fn install_signal_handlers(handles: &Vec<RunHandle>, timeout: Option<u64>) -> Re
             match signal {
                 SIGINT | SIGTERM => {
                     if received_signal {
-                        println!("Received signal again. Killing child processes.");
+                        eprintln!("Received signal again. Killing child processes.");
                         send_kills_and_exit();
                     } else {
                         let send_kills_and_exit = send_kills_and_exit.clone();
@@ -392,12 +403,12 @@ fn install_signal_handlers(handles: &Vec<RunHandle>, timeout: Option<u64>) -> Re
                         thread::spawn(move || {
                             // 5 second timeout
                             std::thread::sleep(std::time::Duration::from_secs(timeout));
-                            println!("Timeout. Sending SIGKILL to child processes.");
+                            eprintln!("Timeout. Sending SIGKILL to child processes.");
                             send_kills_and_exit();
                         });
 
                         received_signal = true;
-                        println!("Received signal. Waiting for child processes to exit...");
+                        eprintln!("Received signal. Waiting for child processes to exit...");
                     }
                 }
 
