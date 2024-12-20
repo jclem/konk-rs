@@ -8,7 +8,10 @@ use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::Signals,
 };
-use std::{sync::mpsc, thread};
+use std::{
+    sync::{mpsc, Arc},
+    thread,
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -36,6 +39,13 @@ enum Commands {
             global = true
         )]
         npm: Vec<String>,
+
+        #[arg(
+            long,
+            help = "Timeout (in seconds) for commands to exit after interrupt",
+            global = true
+        )]
+        timeout: Option<u64>,
 
         #[arg(
             short = 'b',
@@ -133,6 +143,7 @@ fn main() -> Result<()> {
             bun,
             command_as_label,
             continue_on_error,
+            timeout,
             labels: provided_labels,
             show_pid,
             no_color,
@@ -142,8 +153,8 @@ fn main() -> Result<()> {
             command,
             working_directory,
         } => {
-            if let Err(err) = add_npm_commands(&mut commands, &npm, bun) {
-                anyhow::bail!("adding npm commands: {}", err);
+            if let Err(err) = collect_npm_commands(&mut commands, &npm, bun) {
+                anyhow::bail!("collecting npm commands: {}", err);
             }
 
             if provided_labels.len() > 0 && provided_labels.len() != commands.len() {
@@ -175,13 +186,18 @@ fn main() -> Result<()> {
                 .collect();
 
             match command {
-                RunCommands::Serially {} => {
-                    run_serially(&mut runnables, SerialOpts { continue_on_error })
-                }
+                RunCommands::Serially {} => run_serially(
+                    &mut runnables,
+                    SerialOpts {
+                        timeout,
+                        continue_on_error,
+                    },
+                ),
 
                 RunCommands::Concurrently { aggregate_output } => run_concurrently(
                     &mut runnables,
                     ConcurrentOpts {
+                        timeout,
                         continue_on_error,
                         aggregate_output,
                     },
@@ -192,6 +208,7 @@ fn main() -> Result<()> {
 }
 
 struct SerialOpts {
+    timeout: Option<u64>,
     continue_on_error: bool,
 }
 
@@ -202,7 +219,7 @@ fn run_serially(runnables: &mut [Runnable], opts: SerialOpts) -> Result<()> {
         let handle = runnable.run(false).context("run command")?;
         let handles = vec![handle];
 
-        install_signal_handlers(&handles)?;
+        install_signal_handlers(&handles, opts.timeout)?;
 
         for handle in handles.into_iter() {
             if let Err(err) = handle.wait() {
@@ -223,6 +240,7 @@ fn run_serially(runnables: &mut [Runnable], opts: SerialOpts) -> Result<()> {
 }
 
 struct ConcurrentOpts {
+    timeout: Option<u64>,
     continue_on_error: bool,
     aggregate_output: bool,
 }
@@ -236,7 +254,7 @@ fn run_concurrently(runnables: &mut [Runnable], opts: ConcurrentOpts) -> Result<
         handles.push(handle);
     }
 
-    install_signal_handlers(&handles)?;
+    install_signal_handlers(&handles, opts.timeout)?;
 
     let (tx, rx) = mpsc::channel::<Result<()>>();
 
@@ -271,7 +289,7 @@ fn run_concurrently(runnables: &mut [Runnable], opts: ConcurrentOpts) -> Result<
     Ok(())
 }
 
-fn add_npm_commands(commands: &mut Vec<String>, npm: &[String], use_bun: bool) -> Result<()> {
+fn collect_npm_commands(commands: &mut Vec<String>, npm: &[String], use_bun: bool) -> Result<()> {
     if npm.len() == 0 {
         return Ok(());
     }
@@ -338,33 +356,48 @@ fn collect_labels(
         .collect()
 }
 
-fn install_signal_handlers(handles: &Vec<RunHandle>) -> Result<()> {
+fn install_signal_handlers(handles: &Vec<RunHandle>, timeout: Option<u64>) -> Result<()> {
     let pids: Vec<u32> = handles.iter().map(|h| h.get_pid()).collect();
     let mut signals = Signals::new([SIGINT, SIGTERM]).context("register signals")?;
     let mut received_signal = false;
+    let timeout = timeout.unwrap_or(5);
+
+    let send_kills_and_exit = Arc::new(move || {
+        for pid in pids.iter() {
+            // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
+            let pid = nix::unistd::Pid::from_raw(*pid as i32);
+
+            let _ = nix::sys::signal::kill(pid, nix::sys::signal::SIGKILL)
+                .context("send signal to child")
+                .or_else(|err| -> Result<()> {
+                    eprintln!("Failed to send signal to child process: {}", err);
+                    Ok(())
+                });
+        }
+        // Exit: This ensures we don't continue running the main
+        // thread and potentially spawning more serial commands.
+        std::process::exit(130);
+    });
 
     thread::spawn(move || {
         for signal in signals.forever() {
             match signal {
                 SIGINT | SIGTERM => {
                     if received_signal {
-                        for pid in pids.iter() {
-                            // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
-                            let pid = nix::unistd::Pid::from_raw(*pid as i32);
-
-                            let _ = nix::sys::signal::kill(pid, nix::sys::signal::SIGKILL)
-                                .context("send signal to child")
-                                .or_else(|err| -> Result<()> {
-                                    eprintln!("Failed to send signal to child process: {}", err);
-                                    Ok(())
-                                });
-                        }
-
-                        // Exit: This ensures we don't continue running the main
-                        // thread and potentially spawning more serial commands.
-                        std::process::exit(130);
+                        println!("Received signal again. Killing child processes.");
+                        send_kills_and_exit();
                     } else {
+                        let send_kills_and_exit = send_kills_and_exit.clone();
+
+                        thread::spawn(move || {
+                            // 5 second timeout
+                            std::thread::sleep(std::time::Duration::from_secs(timeout));
+                            println!("Timeout. Sending SIGKILL to child processes.");
+                            send_kills_and_exit();
+                        });
+
                         received_signal = true;
+                        println!("Received signal. Waiting for child processes to exit...");
                     }
                 }
 
