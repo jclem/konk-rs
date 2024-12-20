@@ -10,7 +10,6 @@ use signal_hook::{
     iterator::Signals,
 };
 use std::{
-    nk,
     sync::{mpsc, Arc},
     thread,
 };
