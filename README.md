@@ -105,15 +105,17 @@ label.
 ```shell
 npm run check
 [npm run check:format] 
-[npm run check:format] > my-package@0.0.0 check:format
+[npm run check:format] > alight@0.0.0 check:format
 [npm run check:format] > prettier --check .
 [npm run check:format] 
 [npm run check:format] Checking formatting...
 [npm run check:format] All matched files use Prettier code style!
+[npm run check:format] exit status: 0
 [npm run check:lint  ] 
-[npm run check:lint  ] > my-package@0.0.0 check:lint
+[npm run check:lint  ] > alight@0.0.0 check:lint
 [npm run check:lint  ] > eslint .
 [npm run check:lint  ] 
+[npm run check:lint  ] exit status: 0
 ```
 
 ### CLI Help
