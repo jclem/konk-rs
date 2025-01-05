@@ -50,6 +50,9 @@ Run the procfile commands concurrently:
 
 ```shell
 konk procfile
+```
+
+```text
 [a] a
 [a] exit status: 0
 [b] b
@@ -71,6 +74,9 @@ Run three commands serially:
 
 ```shell
 konk run s "echo A" "echo B" "echo C"
+```
+
+```text
 [0] A
 [0] exit status: 0
 [1] B
@@ -83,6 +89,9 @@ Run three commands serially with custom labels:
 
 ```shell
 konk run s -l "1A" "echo A" -l "2B" "echo B" -l "3C" "echo C"
+```
+
+```text
 [1A] A
 [1A] exit status: 0
 [2B] B
@@ -95,6 +104,9 @@ Run commands concurrently, using the commands themselves as labels:
 
 ```shell
 konk run c -L "echo A; sleep 1; echo D" "echo B" "echo C"
+```
+
+```text
 [echo A; sleep 1; echo D] A
 [echo B                 ] B
 [echo B                 ] exit status: 0
@@ -126,6 +138,9 @@ label.
 
 ```shell
 npm run check
+```
+
+```text
 [npm run check:format] 
 [npm run check:format] > alight@0.0.0 check:format
 [npm run check:format] > prettier --check .
