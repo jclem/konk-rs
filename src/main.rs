@@ -404,19 +404,13 @@ fn start_command(
 
     let pid = child.id();
 
-    let label = if runnable.with_pid {
-        format!("{}(PID: {}) ", runnable.label, pid)
-    } else {
-        runnable.label
-    };
-
     let (tx, rx) = mpsc::channel::<String>();
 
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let stdout_handle = read_stream(stdout, &label, tx.clone());
+    let stdout_handle = read_stream(stdout, tx.clone());
 
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-    let stderr_handle = read_stream(stderr, &label, tx.clone());
+    let stderr_handle = read_stream(stderr, tx.clone());
 
     Ok((
         pid,
@@ -425,7 +419,15 @@ fn start_command(
 
             let mut lines = Vec::<String>::new();
 
-            for line in rx {
+            let label = if runnable.with_pid {
+                format!("{}(PID: {}) ", runnable.label, pid)
+            } else {
+                runnable.label
+            };
+
+            for mut line in rx {
+                line = format!("{}{}", label, line);
+
                 if opts.aggregate_output {
                     lines.push(line);
                 } else {
@@ -454,22 +456,15 @@ fn start_command(
     ))
 }
 
-fn read_stream<R>(
-    stream: R,
-    label: &str,
-    into: mpsc::Sender<String>,
-) -> thread::JoinHandle<Result<()>>
+fn read_stream<R>(stream: R, into: mpsc::Sender<String>) -> thread::JoinHandle<Result<()>>
 where
     R: Read + Send + 'static,
 {
-    let label = label.to_owned();
-
     thread::spawn(move || -> Result<()> {
         let reader = BufReader::new(stream);
 
         for line in reader.lines() {
-            let line = format!("{}{}", label, line?);
-            into.send(line)?;
+            into.send(line?)?;
         }
 
         Ok(())
