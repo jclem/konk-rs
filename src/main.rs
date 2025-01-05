@@ -1,55 +1,40 @@
-mod runnable;
+use std::{
+    collections::HashMap,
+    fs,
+    io::{prelude::*, BufReader},
+    process,
+    sync::{mpsc, Arc, Mutex},
+    thread,
+    time::Duration,
+};
 
-use anyhow::{Context, Result};
-use clap::{CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
-use runnable::{RunHandle, Runnable};
-use serde::Deserialize;
+use anyhow::{anyhow, bail, ensure, Result};
+use clap::{command, Parser, Subcommand};
+use nix::{sys::signal, unistd};
 use signal_hook::{
     consts::{SIGINT, SIGTERM},
     iterator::Signals,
 };
-use std::{
-    sync::{mpsc, Arc},
-    thread,
-};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(version, about, long_about = None, bin_name = "konk")]
 struct CLI {
     #[command(subcommand)]
-    command: Commands,
+    command: Command,
 }
 
-#[derive(Deserialize, Debug)]
-struct PackageJSON {
-    scripts: std::collections::HashMap<String, String>,
-}
-
-#[derive(Subcommand, Debug)]
-enum Commands {
-    #[command(about = "Generate completion for a given shell")]
-    Completion { shell: Shell },
-
+#[derive(Subcommand)]
+enum Command {
     #[command(
         alias = "r",
         about = "Run commands serially or concurrently (alias: r)"
     )]
     Run {
-        #[arg(
-            short = 'n',
-            long,
-            help = "Run script from package.json",
-            global = true
-        )]
-        npm: Vec<String>,
+        #[command(subcommand)]
+        command: RunCommand,
 
-        #[arg(
-            long,
-            help = "Timeout (in seconds) for commands to exit after interrupt",
-            global = true
-        )]
-        timeout: Option<u64>,
+        #[arg(global = true)]
+        commands: Vec<String>,
 
         #[arg(
             short = 'b',
@@ -62,7 +47,7 @@ enum Commands {
         #[arg(
             short = 'L',
             long,
-            help = "Use command as its own label",
+            help = "Use each command as its own label",
             global = true
         )]
         command_as_label: bool,
@@ -70,70 +55,54 @@ enum Commands {
         #[arg(
             short = 'c',
             long,
-            help = "Continue running commands after a failure",
+            help = "Continue running commands after any failures",
             global = true
         )]
-        continue_on_error: bool,
+        continue_on_failure: bool,
+
+        #[arg(
+            long,
+            help = "Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them",
+            default_value = "10",
+            global = true
+        )]
+        kill_timeout: u16,
 
         #[arg(
             short = 'l',
             long = "label",
-            help = "Label prefix for a command",
+            help = "Label prefix for each command (must match given number of commands)",
             global = true
         )]
         labels: Vec<String>,
 
-        #[arg(
-            short = 'C',
-            long = "no-color",
-            help = "Do not colorize label output",
-            global = true
-        )]
-        no_color: bool,
+        #[arg(long, help = "Do not attach label to output", global = true)]
+        no_label: bool,
 
-        #[arg(
-            short = 'S',
-            long = "no-subshell",
-            help = "Do not run commands in a subshell",
-            global = true
-        )]
+        #[arg(long, help = "Do not run commands with a subshell", global = true)]
         no_subshell: bool,
 
         #[arg(
-            short = 'B',
+            short = 'n',
             long,
-            help = "Do not attach label to output",
+            help = "Run script defined in package.json by name",
             global = true
         )]
-        no_label: bool,
+        npm: Vec<String>,
 
-        #[arg(long, help = "Include command PID in label", global = true)]
+        #[arg(long, help = "Include command PID in output", global = true)]
         show_pid: bool,
-
-        #[arg(global = true)]
-        commands: Vec<String>,
-
-        #[command(subcommand)]
-        command: RunCommands,
-
-        #[arg(
-            short = 'w',
-            long,
-            help = "Working directory for commands",
-            global = true
-        )]
-        working_directory: Option<String>,
     },
 }
 
-#[derive(Subcommand, Debug)]
-enum RunCommands {
+#[derive(Subcommand)]
+enum RunCommand {
     #[command(alias = "s", about = "Run commands serially (alias: s)")]
     Serially {},
 
     #[command(alias = "c", about = "Run commands concurrently (alias: c)")]
     Concurrently {
-        #[arg(short = 'g', long, help = "Aggregate command output", global = true)]
+        #[arg(short = 'g', long, help = "Aggregate command output")]
         aggregate_output: bool,
     },
 }
@@ -142,187 +111,150 @@ fn main() -> Result<()> {
     let args = CLI::parse();
 
     match args.command {
-        Commands::Completion { shell } => {
-            let mut cmd = CLI::command();
-            let bin_name = cmd.get_bin_name().context("bin name")?.to_string();
-            generate(shell, &mut cmd, bin_name, &mut std::io::stdout());
-            Ok(())
-        }
-
-        Commands::Run {
-            npm,
+        crate::Command::Run {
+            command,
+            mut commands,
             bun,
             command_as_label,
-            continue_on_error,
-            timeout,
+            continue_on_failure,
+            kill_timeout,
             labels: provided_labels,
-            show_pid,
-            no_color,
             no_label,
             no_subshell,
-            mut commands,
-            command,
-            working_directory,
+            npm,
+            show_pid,
         } => {
-            if let Err(err) = collect_npm_commands(&mut commands, &npm, bun) {
-                anyhow::bail!("collecting npm commands: {}", err);
+            if let Err(err) =
+                collect_npm_commands(&mut commands, &npm, if bun { "bun" } else { "npm" })
+            {
+                bail!("collecting npm commands: {}", err);
             }
 
-            if provided_labels.len() > 0 && provided_labels.len() != commands.len() {
-                anyhow::bail!("Number of provided_labels must match number of commands");
-            }
+            ensure!(
+                !(no_label && command_as_label),
+                "Cannot use both --no-label and --command-as-label"
+            );
 
-            if provided_labels.len() > 0 && command_as_label {
-                anyhow::bail!("Cannot use -L and -l together");
-            }
+            ensure!(
+                provided_labels.len() == 0 || provided_labels.len() == commands.len(),
+                "Number of labels must match number of commands"
+            );
 
-            let labels;
-            if no_label {
-                labels = vec!["".to_string(); commands.len()];
+            ensure!(
+                !(provided_labels.len() > 0 && no_label),
+                "Cannot use --no-label with --label"
+            );
+
+            ensure!(
+                !(provided_labels.len() > 0 && command_as_label),
+                "Cannot use --command-as-label with --label"
+            );
+
+            let labels = if no_label {
+                vec!["".to_string(); commands.len()]
             } else {
-                labels = collect_labels(&commands, &provided_labels, command_as_label, !no_color);
-            }
+                collect_labels(
+                    &commands,
+                    LabelOpts {
+                        command_as_label,
+                        provided_labels,
+                    },
+                )
+            };
 
-            let mut runnables: Vec<Runnable> = commands
-                .iter()
-                .zip(labels.iter())
+            let runnables = commands
+                .into_iter()
+                .zip(labels)
                 .map(|(command, label)| Runnable {
-                    command: command.clone(),
-                    label: label.clone(),
-                    working_dir: working_directory.clone(),
-                    use_subshell: !no_subshell,
-                    show_pid,
+                    label,
+                    command,
+                    with_pid: show_pid,
                 })
                 .collect();
 
             match command {
-                RunCommands::Serially {} => run_serially(
-                    &mut runnables,
-                    SerialOpts {
-                        timeout,
-                        continue_on_error,
-                    },
-                ),
-
-                RunCommands::Concurrently { aggregate_output } => run_concurrently(
-                    &mut runnables,
-                    ConcurrentOpts {
-                        timeout,
-                        continue_on_error,
-                        aggregate_output,
-                    },
-                ),
-            }
-        }
-    }
-}
-
-struct SerialOpts {
-    timeout: Option<u64>,
-    continue_on_error: bool,
-}
-
-fn run_serially(runnables: &mut [Runnable], opts: SerialOpts) -> Result<()> {
-    let mut command_failed = false;
-
-    for runnable in runnables.into_iter() {
-        let handle = runnable.run(false).context("run command")?;
-        let handles = vec![handle];
-
-        install_signal_handlers(&handles, opts.timeout)?;
-
-        for handle in handles.into_iter() {
-            if let Err(err) = handle.wait() {
-                eprintln!("{err}");
-                command_failed = true;
-                if !opts.continue_on_error {
-                    break;
+                RunCommand::Serially {} => {
+                    run_serially(
+                        runnables,
+                        SeriallyOpts {
+                            continue_on_failure,
+                            kill_timeout,
+                            no_subshell,
+                        },
+                    )?;
+                }
+                RunCommand::Concurrently { aggregate_output } => {
+                    run_concurrently(
+                        runnables,
+                        ConcurrentlyOpts {
+                            aggregate_output,
+                            continue_on_failure,
+                            kill_timeout,
+                            no_subshell,
+                        },
+                    )?;
                 }
             }
         }
     }
-
-    if command_failed {
-        anyhow::bail!("One or more commands failed");
-    }
-
     Ok(())
 }
 
-struct ConcurrentOpts {
-    timeout: Option<u64>,
-    continue_on_error: bool,
-    aggregate_output: bool,
+struct LabelOpts {
+    command_as_label: bool,
+    provided_labels: Vec<String>,
 }
 
-fn run_concurrently(runnables: &mut [Runnable], opts: ConcurrentOpts) -> Result<()> {
-    let mut handles: Vec<RunHandle> = vec![];
-    let mut command_failed = false;
-
-    for runnable in runnables {
-        let handle = runnable.run(opts.aggregate_output).context("run command")?;
-        handles.push(handle);
-    }
-
-    install_signal_handlers(&handles, opts.timeout)?;
-
-    let (tx, rx) = mpsc::channel::<Result<()>>();
-
-    for handle in handles {
-        let tx = tx.clone();
-
-        thread::spawn(move || {
-            let res = handle.wait();
-            let _ = tx.send(res).or_else(|err| -> Result<()> {
-                eprintln!("Failed to send result to main thread: {}", err);
-                Ok(())
-            });
-        });
-    }
-
-    drop(tx);
-
-    for result in rx {
-        if let Err(err) = result {
-            eprintln!("{err}");
-            command_failed = true;
-            if !opts.continue_on_error {
-                break;
+fn collect_labels(commands: &[String], opts: LabelOpts) -> Vec<String> {
+    let labels: Vec<String> = commands
+        .iter()
+        .enumerate()
+        .map(|(i, command)| {
+            if opts.command_as_label {
+                command.to_owned()
+            } else {
+                opts.provided_labels
+                    .get(i)
+                    .cloned()
+                    .unwrap_or_else(|| i.to_string())
             }
-        }
-    }
+        })
+        .collect();
 
-    if command_failed {
-        anyhow::bail!("One or more commands failed");
-    }
+    let max_len = labels.iter().map(|label| label.len()).max().unwrap_or(0);
 
-    Ok(())
+    labels
+        .into_iter()
+        .map(|label| {
+            let padding = " ".repeat(max_len - label.len());
+            format!("[{}{}] ", label, padding)
+        })
+        .collect()
 }
 
-fn collect_npm_commands(commands: &mut Vec<String>, npm: &[String], use_bun: bool) -> Result<()> {
+#[derive(serde::Deserialize)]
+struct PackageJSON {
+    scripts: HashMap<String, String>,
+}
+
+fn collect_npm_commands(commands: &mut Vec<String>, npm: &[String], run_with: &str) -> Result<()> {
     if npm.len() == 0 {
         return Ok(());
     }
 
-    let package_json = std::fs::read_to_string("package.json").context("read package.json")?;
-
-    let package_json: PackageJSON =
-        serde_json::from_str(&package_json).context("parse package.json")?;
-
-    let run_with = if use_bun { "bun" } else { "npm" };
+    let package_json = fs::read_to_string("package.json")?;
+    let package_json = serde_json::from_str::<PackageJSON>(&package_json)?;
 
     for script in npm {
-        if script.ends_with("*") {
-            let prefix = script.strip_suffix("*").unwrap(); // Already checked suffix.
-
+        if let Some(prefix) = script.strip_suffix("*") {
             package_json.scripts.keys().for_each(|key| {
-                key.starts_with(prefix).then(|| {
+                if key.starts_with(prefix) {
                     commands.push(format!("{} run {}", run_with, key));
-                });
-            });
+                }
+            })
         } else {
             if !package_json.scripts.contains_key(script) {
-                anyhow::bail!(r#"Script "{}" does not exist in package.json"#, script);
+                bail!(r#"Script "{}" does not exist in package.json"#, script)
             }
 
             commands.push(format!("{} run {}", run_with, script));
@@ -332,89 +264,274 @@ fn collect_npm_commands(commands: &mut Vec<String>, npm: &[String], use_bun: boo
     Ok(())
 }
 
-fn collect_labels(
-    commands: &[String],
-    provided_labels: &[String],
-    command_as_label: bool,
-    use_color: bool,
-) -> Vec<String> {
-    let labels: Vec<String> = if command_as_label {
-        commands.iter().cloned().collect()
-    } else {
-        commands
-            .iter()
-            .enumerate()
-            .map(|(i, _)| {
-                provided_labels
-                    .get(i)
-                    .cloned()
-                    .unwrap_or_else(|| i.to_string())
-            })
-            .collect()
-    };
-
-    let max_label_len = labels.iter().map(|l| l.len()).max().unwrap_or_default();
-
-    labels
-        .into_iter()
-        .enumerate()
-        .map(|(i, label)| {
-            let color = if use_color { 31 + (i % 9) } else { 0 };
-            let padding = " ".repeat(max_label_len - label.len());
-            format!("\x1b[0;{}m[{}{}]\x1b[0m ", color, label, padding)
-        })
-        .collect()
+struct Runnable {
+    label: String,
+    with_pid: bool,
+    command: String,
 }
 
-fn install_signal_handlers(handles: &Vec<RunHandle>, timeout: Option<u64>) -> Result<()> {
-    let pids: Vec<u32> = handles.iter().map(|h| h.get_pid()).collect();
-    let mut signals = Signals::new([SIGINT, SIGTERM]).context("register signals")?;
-    let mut received_signal = false;
-    let timeout = timeout.unwrap_or(5);
+struct SeriallyOpts {
+    continue_on_failure: bool,
+    kill_timeout: u16,
+    no_subshell: bool,
+}
 
-    let send_kills_and_exit = Arc::new(move || {
-        for pid in pids.iter() {
-            // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
-            let pid = nix::unistd::Pid::from_raw(*pid as i32);
+fn run_serially(runnables: Vec<Runnable>, opts: SeriallyOpts) -> Result<()> {
+    let mut command_failed = false;
 
-            let _ = nix::sys::signal::kill(pid, nix::sys::signal::SIGKILL)
-                .context("send signal to child")
-                .or_else(|err| -> Result<()> {
-                    eprintln!("Failed to send signal to child process: {}", err);
-                    Ok(())
-                });
+    for runnable in runnables {
+        let (pid, handle) = start_command(
+            runnable,
+            CommandOpts {
+                aggregate_output: false,
+                no_subshell: opts.no_subshell,
+            },
+        )?;
+
+        install_signal_handlers(vec![pid], opts.kill_timeout)?;
+
+        let (exit_status, _) = handle
+            .join()
+            .map_err(|e| anyhow!("thread panicked: {:?}", e))??;
+
+        if exit_status.success() {
+            continue;
         }
-        // Exit: This ensures we don't continue running the main
-        // thread and potentially spawning more serial commands.
-        std::process::exit(130);
-    });
 
-    thread::spawn(move || {
-        for signal in signals.forever() {
-            match signal {
-                SIGINT | SIGTERM => {
-                    if received_signal {
-                        eprintln!("Received signal again. Killing child processes.");
-                        send_kills_and_exit();
-                    } else {
-                        let send_kills_and_exit = send_kills_and_exit.clone();
+        command_failed = true;
 
-                        thread::spawn(move || {
-                            // 5 second timeout
-                            std::thread::sleep(std::time::Duration::from_secs(timeout));
-                            eprintln!("Timeout. Sending SIGKILL to child processes.");
-                            send_kills_and_exit();
-                        });
+        if !opts.continue_on_failure {
+            break;
+        }
+    }
 
-                        received_signal = true;
-                        eprintln!("Received signal. Waiting for child processes to exit...");
-                    }
+    if command_failed {
+        bail!("One or more commands failed.");
+    }
+
+    Ok(())
+}
+
+struct ConcurrentlyOpts {
+    aggregate_output: bool,
+    continue_on_failure: bool,
+    kill_timeout: u16,
+    no_subshell: bool,
+}
+
+fn run_concurrently(runnables: Vec<Runnable>, opts: ConcurrentlyOpts) -> Result<()> {
+    let (tx, rx) = mpsc::channel::<Result<(process::ExitStatus, Vec<String>)>>();
+    let mut pids: Vec<u32> = Vec::new();
+
+    for runnable in runnables {
+        let (pid, handle) = start_command(
+            runnable,
+            CommandOpts {
+                aggregate_output: opts.aggregate_output,
+                no_subshell: opts.no_subshell,
+            },
+        )?;
+
+        pids.push(pid);
+
+        let tx = tx.clone();
+        thread::spawn(move || {
+            match handle
+                .join()
+                .map_err(|e| anyhow!("thread panicked: {:?}", e))
+            {
+                Ok(r) => tx.send(r).unwrap(),
+                Err(e) => tx.send(Err(e)).unwrap(),
+            };
+        });
+    }
+
+    install_signal_handlers(pids, opts.kill_timeout)?;
+
+    drop(tx);
+
+    let mut command_failed = false;
+
+    for result in rx {
+        match result {
+            Ok((exit_status, lines)) => {
+                for line in lines.iter() {
+                    println!("{}", line);
                 }
 
-                _ => {}
+                if exit_status.success() {
+                    continue;
+                }
+
+                command_failed = true;
+
+                if !opts.continue_on_failure {
+                    break;
+                }
+            }
+
+            Err(e) => return Err(e),
+        }
+    }
+
+    if command_failed {
+        bail!("One or more commands failed.");
+    }
+
+    Ok(())
+}
+
+struct CommandOpts {
+    aggregate_output: bool,
+    no_subshell: bool,
+}
+
+fn start_command(
+    runnable: Runnable,
+    opts: CommandOpts,
+) -> Result<(
+    u32,
+    thread::JoinHandle<Result<(process::ExitStatus, Vec<String>)>>,
+)> {
+    let mut cmd;
+    if opts.no_subshell {
+        let parts = shell_words::split(&runnable.command)?;
+        let (command, args) = parts.split_first().ok_or_else(|| anyhow!("no command"))?;
+        cmd = process::Command::new(command);
+        cmd.args(args);
+    } else {
+        cmd = process::Command::new("/bin/sh");
+        cmd.args(["-c", &runnable.command]);
+    }
+
+    let mut child = cmd
+        .stdout(process::Stdio::piped())
+        .stderr(process::Stdio::piped())
+        .spawn()?;
+
+    let pid = child.id();
+    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    let stdout_into = if opts.aggregate_output {
+        Some(lines.clone())
+    } else {
+        None
+    };
+
+    let label = if runnable.with_pid {
+        format!("{}(PID: {}) ", runnable.label, pid)
+    } else {
+        runnable.label
+    };
+
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let stdout_handle = read_stream(stdout, &label, stdout_into);
+
+    let stderr_into = if opts.aggregate_output {
+        Some(lines.clone())
+    } else {
+        None
+    };
+
+    let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
+    let stderr_handle = read_stream(stderr, &label, stderr_into);
+
+    Ok((
+        pid,
+        thread::spawn(move || -> Result<(process::ExitStatus, Vec<String>)> {
+            stdout_handle
+                .join()
+                .map_err(|e| anyhow!("thread panicked: {:?}", e))??;
+
+            stderr_handle
+                .join()
+                .map_err(|e| anyhow!("thread panicked: {:?}", e))??;
+
+            let exit_status = child.wait()?;
+
+            eprintln!("{}{}", label, exit_status);
+
+            // The Arc count should be 1 since both stream threads have joined, and this function
+            // would have returned if either of them had panicked.
+            let lines = Arc::try_unwrap(lines).unwrap().into_inner().unwrap();
+
+            Ok((exit_status, lines))
+        }),
+    ))
+}
+
+fn read_stream<R>(
+    stream: R,
+    label: &str,
+    into: Option<Arc<Mutex<Vec<String>>>>,
+) -> thread::JoinHandle<Result<()>>
+where
+    R: Read + Send + 'static,
+{
+    let label = label.to_owned();
+
+    thread::spawn(move || -> Result<()> {
+        let reader = BufReader::new(stream);
+
+        for line in reader.lines() {
+            let line = format!("{}{}", label, line?);
+
+            if let Some(ref into) = into {
+                into.lock().unwrap().push(line);
+            } else {
+                println!("{line}");
+            }
+        }
+
+        Ok(())
+    })
+}
+
+fn install_signal_handlers(pids: Vec<u32>, timeout: u16) -> Result<()> {
+    let mut signals = Signals::new([SIGINT, SIGTERM])?;
+
+    thread::spawn(move || {
+        let mut received_signal = false;
+
+        for signal in signals.forever() {
+            if let SIGINT | SIGTERM = signal {
+                if received_signal {
+                    eprintln!("Received signal again. Killing processes.");
+                    kill_all_and_exit(&pids);
+                } else {
+                    received_signal = true;
+
+                    let timeout = timeout.clone();
+                    let pids = pids.clone();
+
+                    thread::spawn(move || {
+                        thread::sleep(Duration::from_secs(timeout.to_owned().into()));
+                        eprintln!("Timeout. Killing child processes.");
+                        kill_all_and_exit(&pids);
+                    });
+
+                    eprintln!("Received signal. Waiting for child processes to exit.");
+                }
             }
         }
     });
 
     Ok(())
+}
+
+fn kill_all_and_exit(pids: &[u32]) {
+    pids.iter().for_each(|pid| kill_process(pid.to_owned()));
+    process::exit(130);
+}
+
+fn kill_process(pid: u32) {
+    // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
+    let pid = unistd::Pid::from_raw(pid as i32);
+
+    eprintln!("Sending SIGKILL to process {}.", pid);
+
+    match signal::kill(pid, signal::SIGKILL) {
+        Err(e) => eprintln!("Failed to send SIGKILL to process {}: {:?}", pid, e),
+        Ok(_) => {}
+    };
 }
