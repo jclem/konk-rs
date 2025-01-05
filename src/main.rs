@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    fs,
+    env, fs,
     io::{prelude::*, BufReader},
     process,
     sync::mpsc,
@@ -43,6 +43,9 @@ enum Command {
             global = true
         )]
         bun: bool,
+
+        #[arg(long, help = "Enable color output", global = true)]
+        color: Option<bool>,
 
         #[arg(
             short = 'L',
@@ -115,6 +118,7 @@ fn main() -> Result<()> {
             command,
             mut commands,
             bun,
+            color,
             command_as_label,
             continue_on_failure,
             kill_timeout,
@@ -153,10 +157,14 @@ fn main() -> Result<()> {
             let labels = if no_label {
                 vec!["".to_string(); commands.len()]
             } else {
+                let env_no_color = env::var("NO_COLOR").unwrap_or("0".to_string()) != "0";
+                let color = color.unwrap_or(!env_no_color);
+
                 collect_labels(
                     &commands,
                     LabelOpts {
                         command_as_label,
+                        color,
                         provided_labels,
                     },
                 )
@@ -202,6 +210,7 @@ fn main() -> Result<()> {
 
 struct LabelOpts {
     command_as_label: bool,
+    color: bool,
     provided_labels: Vec<String>,
 }
 
@@ -225,9 +234,16 @@ fn collect_labels(commands: &[String], opts: LabelOpts) -> Vec<String> {
 
     labels
         .into_iter()
-        .map(|label| {
+        .enumerate()
+        .map(|(i, label)| {
             let padding = " ".repeat(max_len - label.len());
-            format!("[{}{}] ", label, padding)
+
+            if !opts.color {
+                return format!("[{}{}] ", label, padding);
+            }
+
+            let color = 31 + (i % 6);
+            format!("\x1b[0;{}m[{}{}]\x1b[0m ", color, label, padding)
         })
         .collect()
 }
@@ -402,8 +418,6 @@ fn start_command(
         .stderr(process::Stdio::piped())
         .spawn()?;
 
-    let pid = child.id();
-
     let (tx, rx) = mpsc::channel::<String>();
 
     let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
@@ -411,6 +425,8 @@ fn start_command(
 
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
     let stderr_handle = read_stream(stderr, tx.clone());
+
+    let pid = child.id();
 
     Ok((
         pid,
