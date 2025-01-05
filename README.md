@@ -36,6 +36,28 @@ npm install -g konk
 
 ## Usage
 
+### Run a Procfile
+
+Given a procfile defined as follows:
+
+```shell
+a: echo A
+b: echo B
+c: echo C
+```
+
+Run the procfile commands concurrently:
+
+```shell
+konk procfile
+[a] a
+[a] exit status: 0
+[b] b
+[b] exit status: 0
+[c] c
+[c] exit status: 0
+```
+
 ### Run Commands
 
 Commands can be provided as arguments to run them as-is, or they can be
@@ -119,6 +141,23 @@ npm run check
 ```
 
 ### CLI Help
+
+#### Run Procfile
+
+```shell
+Run commands defined in a Procfile (alias: p)
+
+Usage: konk procfile [OPTIONS]
+
+Options:
+      --color <COLOR>                Enable color output [possible values: true, false]
+  -c, --continue-on-failure          Continue running commands after any failures
+      --kill-timeout <KILL_TIMEOUT>  Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them [default: 10]
+      --no-label                     Do not attach label to output
+      --no-subshell                  Do not run commands with a subshell
+      --show-pid                     Include command PID in output
+  -h, --help                         Print help
+```
 
 #### Run Commands Serially
 

@@ -25,6 +25,37 @@ struct CLI {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(alias = "p", about = "Run commands defined in a Procfile (alias: p)")]
+    Procfile {
+        #[arg(long, help = "Enable color output", global = true)]
+        color: Option<bool>,
+
+        #[arg(
+            short = 'c',
+            long,
+            help = "Continue running commands after any failures",
+            global = true
+        )]
+        continue_on_failure: bool,
+
+        #[arg(
+            long,
+            help = "Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them",
+            default_value = "10",
+            global = true
+        )]
+        kill_timeout: u16,
+
+        #[arg(long, help = "Do not attach label to output", global = true)]
+        no_label: bool,
+
+        #[arg(long, help = "Do not run commands with a subshell", global = true)]
+        no_subshell: bool,
+
+        #[arg(long, help = "Include command PID in output", global = true)]
+        show_pid: bool,
+    },
+
     #[command(
         alias = "r",
         about = "Run commands serially or concurrently (alias: r)"
@@ -114,6 +145,63 @@ fn main() -> Result<()> {
     let args = CLI::parse();
 
     match args.command {
+        crate::Command::Procfile {
+            color,
+            continue_on_failure,
+            kill_timeout,
+            no_label,
+            no_subshell,
+            show_pid,
+        } => {
+            let labels_commands = read_procfile()?;
+
+            let provided_labels = labels_commands
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect::<Vec<String>>();
+
+            let commands = labels_commands
+                .iter()
+                .map(|(_, command)| command.clone())
+                .collect::<Vec<String>>();
+
+            let labels = if no_label {
+                vec!["".to_string(); commands.len()]
+            } else {
+                let env_no_color = env::var("NO_COLOR").unwrap_or("0".to_string()) != "0";
+                let color = color.unwrap_or(!env_no_color);
+
+                collect_labels(
+                    &commands,
+                    LabelOpts {
+                        command_as_label: false,
+                        color,
+                        provided_labels,
+                    },
+                )
+            };
+
+            let runnables = commands
+                .into_iter()
+                .zip(labels)
+                .map(|(command, label)| Runnable {
+                    label,
+                    command,
+                    with_pid: show_pid,
+                })
+                .collect();
+
+            run_concurrently(
+                runnables,
+                ConcurrentlyOpts {
+                    aggregate_output: false,
+                    continue_on_failure,
+                    kill_timeout,
+                    no_subshell,
+                },
+            )?;
+        }
+
         crate::Command::Run {
             command,
             mut commands,
@@ -206,6 +294,26 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn read_procfile() -> Result<Vec<(String, String)>> {
+    let procfile = fs::read_to_string("Procfile")?;
+
+    let lines = procfile
+        .lines()
+        .map(|line| line.splitn(2, ':').map(str::trim).collect())
+        .collect::<Vec<Vec<&str>>>();
+
+    let mut labels_commands = Vec::<(String, String)>::new();
+
+    for line in lines {
+        match line.as_slice() {
+            [label, command] => labels_commands.push((label.to_string(), command.to_string())),
+            _ => bail!("Invalid line in Procfile: {:?}", line),
+        }
+    }
+
+    Ok(labels_commands)
 }
 
 struct LabelOpts {
