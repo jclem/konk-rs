@@ -152,7 +152,10 @@ Usage: konk procfile [OPTIONS]
 Options:
       --color <COLOR>                Enable color output [possible values: true, false]
   -c, --continue-on-failure          Continue running commands after any failures
+      --env-file <ENV_FILE>          Path to a .env file to load [default: .env]
       --kill-timeout <KILL_TIMEOUT>  Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them [default: 10]
+      --no-env-file                  Do not load the .env file
+      --no-environment               Do not inherit runtime environment variables
       --no-label                     Do not attach label to output
       --no-subshell                  Do not run commands with a subshell
       --show-pid                     Include command PID in output
@@ -176,6 +179,7 @@ Options:
   -c, --continue-on-failure          Continue running commands after any failures
       --kill-timeout <KILL_TIMEOUT>  Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them [default: 10]
   -l, --label <LABELS>               Label prefix for each command (must match given number of commands)
+      --no-environment               Do not inherit runtime environment variables
       --no-label                     Do not attach label to output
       --no-subshell                  Do not run commands with a subshell
   -n, --npm <NPM>                    Run script defined in package.json by name
@@ -201,6 +205,7 @@ Options:
   -c, --continue-on-failure          Continue running commands after any failures
       --kill-timeout <KILL_TIMEOUT>  Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them [default: 10]
   -l, --label <LABELS>               Label prefix for each command (must match given number of commands)
+      --no-environment               Do not inherit runtime environment variables
       --no-label                     Do not attach label to output
       --no-subshell                  Do not run commands with a subshell
   -n, --npm <NPM>                    Run script defined in package.json by name

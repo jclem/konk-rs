@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     env, fs,
-    io::{prelude::*, BufReader},
+    io::{self, prelude::*, BufReader},
     process,
     sync::mpsc,
     thread,
@@ -27,32 +27,39 @@ struct CLI {
 enum Command {
     #[command(alias = "p", about = "Run commands defined in a Procfile (alias: p)")]
     Procfile {
-        #[arg(long, help = "Enable color output", global = true)]
+        #[arg(long, help = "Enable color output")]
         color: Option<bool>,
 
         #[arg(
             short = 'c',
             long,
-            help = "Continue running commands after any failures",
-            global = true
+            help = "Continue running commands after any failures"
         )]
         continue_on_failure: bool,
+
+        #[arg(long, help = "Path to a .env file to load [default: .env]")]
+        env_file: Option<String>,
 
         #[arg(
             long,
             help = "Time (in seconds) for commands to exit after receiving a SIGINT/SIGTERM before a SIGKILL is sent to them",
-            default_value = "10",
-            global = true
+            default_value = "10"
         )]
         kill_timeout: u16,
 
-        #[arg(long, help = "Do not attach label to output", global = true)]
+        #[arg(long, help = "Do not load the .env file")]
+        no_env_file: bool,
+
+        #[arg(long, help = "Do not inherit runtime environment variables")]
+        no_environment: bool,
+
+        #[arg(long, help = "Do not attach label to output")]
         no_label: bool,
 
-        #[arg(long, help = "Do not run commands with a subshell", global = true)]
+        #[arg(long, help = "Do not run commands with a subshell")]
         no_subshell: bool,
 
-        #[arg(long, help = "Include command PID in output", global = true)]
+        #[arg(long, help = "Include command PID in output")]
         show_pid: bool,
     },
 
@@ -110,6 +117,13 @@ enum Command {
         )]
         labels: Vec<String>,
 
+        #[arg(
+            long,
+            help = "Do not inherit runtime environment variables",
+            global = true
+        )]
+        no_environment: bool,
+
         #[arg(long, help = "Do not attach label to output", global = true)]
         no_label: bool,
 
@@ -148,11 +162,19 @@ fn main() -> Result<()> {
         crate::Command::Procfile {
             color,
             continue_on_failure,
+            env_file,
             kill_timeout,
+            no_env_file,
+            no_environment,
             no_label,
             no_subshell,
             show_pid,
         } => {
+            ensure!(
+                !(env_file.is_some() && no_env_file),
+                "Cannot use --env-file with --no-env-file"
+            );
+
             let labels_commands = read_procfile()?;
 
             let provided_labels = labels_commands
@@ -181,12 +203,32 @@ fn main() -> Result<()> {
                 )
             };
 
+            let env = if no_env_file {
+                HashMap::new()
+            } else {
+                if let Some(env_path) = env_file {
+                    env_file_reader::read_file(env_path)?
+                } else {
+                    match env_file_reader::read_file(".env") {
+                        Ok(env) => env,
+                        Err(err) => match err.kind() {
+                            io::ErrorKind::NotFound => HashMap::new(),
+                            e => {
+                                bail!("Error reading .env file: {:?}", e);
+                            }
+                        },
+                    }
+                }
+            };
+
             let runnables = commands
                 .into_iter()
                 .zip(labels)
                 .map(|(command, label)| Runnable {
                     label,
                     command,
+                    env: env.clone(),
+                    inherit_environment: !no_environment,
                     with_pid: show_pid,
                 })
                 .collect();
@@ -211,6 +253,7 @@ fn main() -> Result<()> {
             continue_on_failure,
             kill_timeout,
             labels: provided_labels,
+            no_environment,
             no_label,
             no_subshell,
             npm,
@@ -264,6 +307,8 @@ fn main() -> Result<()> {
                 .map(|(command, label)| Runnable {
                     label,
                     command,
+                    env: HashMap::new(),
+                    inherit_environment: !no_environment,
                     with_pid: show_pid,
                 })
                 .collect();
@@ -390,8 +435,10 @@ fn collect_npm_commands(commands: &mut Vec<String>, npm: &[String], run_with: &s
 
 struct Runnable {
     label: String,
-    with_pid: bool,
     command: String,
+    env: HashMap<String, String>,
+    inherit_environment: bool,
+    with_pid: bool,
 }
 
 struct SeriallyOpts {
@@ -520,6 +567,12 @@ fn start_command(
         cmd = process::Command::new("/bin/sh");
         cmd.args(["-c", &runnable.command]);
     }
+
+    if !runnable.inherit_environment {
+        cmd.env_clear();
+    }
+
+    cmd.envs(runnable.env);
 
     let mut child = cmd
         .stdout(process::Stdio::piped())
