@@ -144,7 +144,7 @@ npm run check
 
 #### Run Procfile
 
-```shell
+```text
 Run commands defined in a Procfile (alias: p)
 
 Usage: konk procfile [OPTIONS]
@@ -164,7 +164,7 @@ Options:
 
 #### Run Commands Serially
 
-```shell
+```text
 Run commands serially (alias: s)
 
 Usage: konk run serially [OPTIONS] [COMMANDS]...
@@ -189,7 +189,7 @@ Options:
 
 #### Run Commands Concurrently
 
-```shell
+```text
 Run commands concurrently (alias: c)
 
 Usage: konk run concurrently [OPTIONS] [COMMANDS]...
