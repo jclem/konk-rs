@@ -3,7 +3,7 @@ use std::{
     fs,
     io::{prelude::*, BufReader},
     process,
-    sync::{mpsc, Arc, Mutex},
+    sync::mpsc,
     thread,
     time::Duration,
 };
@@ -290,7 +290,7 @@ fn run_serially(runnables: Vec<Runnable>, opts: SeriallyOpts) -> Result<()> {
 
         install_signal_handlers(vec![pid], opts.kill_timeout)?;
 
-        let (exit_status, _) = handle
+        let exit_status = handle
             .join()
             .map_err(|e| anyhow!("thread panicked: {:?}", e))??;
 
@@ -320,7 +320,7 @@ struct ConcurrentlyOpts {
 }
 
 fn run_concurrently(runnables: Vec<Runnable>, opts: ConcurrentlyOpts) -> Result<()> {
-    let (tx, rx) = mpsc::channel::<Result<(process::ExitStatus, Vec<String>)>>();
+    let (tx, rx) = mpsc::channel::<Result<process::ExitStatus>>();
     let mut pids: Vec<u32> = Vec::new();
 
     for runnable in runnables {
@@ -354,11 +354,7 @@ fn run_concurrently(runnables: Vec<Runnable>, opts: ConcurrentlyOpts) -> Result<
 
     for result in rx {
         match result {
-            Ok((exit_status, lines)) => {
-                for line in lines.iter() {
-                    println!("{}", line);
-                }
-
+            Ok(exit_status) => {
                 if exit_status.success() {
                     continue;
                 }
@@ -389,10 +385,7 @@ struct CommandOpts {
 fn start_command(
     runnable: Runnable,
     opts: CommandOpts,
-) -> Result<(
-    u32,
-    thread::JoinHandle<Result<(process::ExitStatus, Vec<String>)>>,
-)> {
+) -> Result<(u32, thread::JoinHandle<Result<process::ExitStatus>>)> {
     let mut cmd;
     if opts.no_subshell {
         let parts = shell_words::split(&runnable.command)?;
@@ -410,13 +403,6 @@ fn start_command(
         .spawn()?;
 
     let pid = child.id();
-    let lines = Arc::new(Mutex::new(Vec::<String>::new()));
-
-    let stdout_into = if opts.aggregate_output {
-        Some(lines.clone())
-    } else {
-        None
-    };
 
     let label = if runnable.with_pid {
         format!("{}(PID: {}) ", runnable.label, pid)
@@ -424,21 +410,29 @@ fn start_command(
         runnable.label
     };
 
-    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
-    let stdout_handle = read_stream(stdout, &label, stdout_into);
+    let (tx, rx) = mpsc::channel::<String>();
 
-    let stderr_into = if opts.aggregate_output {
-        Some(lines.clone())
-    } else {
-        None
-    };
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let stdout_handle = read_stream(stdout, &label, tx.clone());
 
     let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
-    let stderr_handle = read_stream(stderr, &label, stderr_into);
+    let stderr_handle = read_stream(stderr, &label, tx.clone());
 
     Ok((
         pid,
-        thread::spawn(move || -> Result<(process::ExitStatus, Vec<String>)> {
+        thread::spawn(move || -> Result<process::ExitStatus> {
+            drop(tx);
+
+            let mut lines = Vec::<String>::new();
+
+            for line in rx {
+                if opts.aggregate_output {
+                    lines.push(line);
+                } else {
+                    println!("{}", line);
+                }
+            }
+
             stdout_handle
                 .join()
                 .map_err(|e| anyhow!("thread panicked: {:?}", e))??;
@@ -449,13 +443,13 @@ fn start_command(
 
             let exit_status = child.wait()?;
 
+            for line in lines.iter() {
+                println!("{}", line);
+            }
+
             eprintln!("{}{}", label, exit_status);
 
-            // The Arc count should be 1 since both stream threads have joined, and this function
-            // would have returned if either of them had panicked.
-            let lines = Arc::try_unwrap(lines).unwrap().into_inner().unwrap();
-
-            Ok((exit_status, lines))
+            Ok(exit_status)
         }),
     ))
 }
@@ -463,7 +457,7 @@ fn start_command(
 fn read_stream<R>(
     stream: R,
     label: &str,
-    into: Option<Arc<Mutex<Vec<String>>>>,
+    into: mpsc::Sender<String>,
 ) -> thread::JoinHandle<Result<()>>
 where
     R: Read + Send + 'static,
@@ -475,12 +469,7 @@ where
 
         for line in reader.lines() {
             let line = format!("{}{}", label, line?);
-
-            if let Some(ref into) = into {
-                into.lock().unwrap().push(line);
-            } else {
-                println!("{line}");
-            }
+            into.send(line)?;
         }
 
         Ok(())
