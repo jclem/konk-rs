@@ -504,13 +504,13 @@ fn install_signal_handlers(pids: Vec<u32>, timeout: u16) -> Result<()> {
 }
 
 fn kill_all_and_exit(pids: &[u32]) {
-    pids.iter().for_each(|pid| kill_process(pid.to_owned()));
+    pids.iter().for_each(kill_process);
     process::exit(130);
 }
 
-fn kill_process(pid: u32) {
+fn kill_process(pid: &u32) {
     // https://github.com/nix-rust/nix/issues/656#issuecomment-2056684715
-    let pid = unistd::Pid::from_raw(pid as i32);
+    let pid = unistd::Pid::from_raw(pid.to_owned() as i32);
 
     eprintln!("Sending SIGKILL to process {}.", pid);
 
